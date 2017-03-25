@@ -1,0 +1,344 @@
+---
+title: "How to deal with features?"
+output:
+  html_document: default
+  html_notebook: default
+---
+Browsing the data, I think the 'decrption', 'feature' and 'photo' columns should contain pretty valuable information, but they are a little bit hard to cope with. Here I tried to deal with 'feature'
+
+Let's play with the renthop data.
+
+## Load data
+```{r load, message=FALSE}
+require(rjson)
+require(dplyr)
+require(purrr)
+require(knitr)
+require(stringr)
+require(h2o)
+require(lubridate)
+require(data.table)
+train = fromJSON(file = "train.json")
+test = fromJSON(file = "test.json")
+
+column <- setdiff(names(train), c("photos", "features"))
+train <- map_at(train, column, unlist) %>% tibble::as_tibble(.)
+# Number of listing in train set
+#nrow(train)
+test <- map_at(test, column, unlist) %>% tibble::as_tibble(.)
+# Number of listing in test set
+#nrow(test)
+```
+
+## Count feature 
+
+```{r feature, message=FALSE}
+# Total number of feature in train set
+length(unique(train$features))
+
+# Summarize count of features
+feature = data.frame(feature = tolower(unlist(train$features))) %>% # convert all features to lower case
+  group_by(feature) %>%
+  summarise(feature_count = n()) %>%
+  arrange(desc(feature_count)) %>%
+  filter(feature_count >= 50) %>%
+  mutate(feature_percent = feature_count/nrow(train))
+
+kable(feature, caption = "Feature Count")
+
+```
+
+## Synonymic features
+```{r synonym}
+# Hardwood
+feature %>%
+  filter(str_detect(feature, 'wood')) %>%
+  kable(caption = "hardwood") 
+
+# Laundry in unit
+feature %>%
+  filter(str_detect(feature, paste(c('laundry', 'dryer', 'washer'), collapse="|"))) %>%
+  filter(!str_detect(feature, "dishwasher")) %>%
+  kable(caption = "Laundry in unit")
+
+# Roof deck
+feature %>%
+  filter(str_detect(feature, 'roof')) %>%
+  kable(caption = "Roof Deck")
+
+# Outdoor space
+feature %>%
+  filter(str_detect(feature, 'outdoor')) %>%
+  kable(caption = "Outdoor Space")
+
+# Garden
+feature %>%
+  filter(str_detect(feature, 'garden')) %>%
+  kable(caption = "Garden")
+
+# Park
+feature %>%
+  filter(str_detect(feature, 'park')) %>%
+  kable(caption = "Parking")
+```
+
+We can easily observe from the table:
+
+* Among 10254 unique feature tags, most features are from the top 10 features
+* Only 89 features show more than 50 times in the train set. 
+* Among the list of top 89 features, many of them overlap with each other.
+
+Therefore, we can transform features into categorical data, and reduce the number of categories by setting a cutoff count and combining similar features. 
+
+```{r feature engineering, message=FALSE}
+
+lanudry = c("laundry in building", "laundry room", "on-site laundry", "laundry in unit", "dryer in unit", "washer in unit", "washer/dryer", "laundry")
+roofdeck = c("roof-deck", "roofdeck", "common roof deck", "roof deck")
+outdoorspace = c("common outdoor space", "private outdoor space", "publicoutdoor", "outdoor areas", "outdoor space")
+
+# Combine similar features
+feature = data.frame(feature = tolower(unlist(train$features))) %>% # Hardwood
+  map_df(~ gsub("hardwood floor", "hardwood", .x)) %>%
+  map_df(~ gsub("hardwoods", "hardwood", .x)) %>%
+  map_df(~ gsub(paste0(lanudry, collapse="|"), "laundry", .x)) %>%
+  map_df(~ gsub(paste0(roofdeck, collapse="|"), "roof deck", .x)) %>%
+  map_df(~ gsub(paste0(outdoorspace, collapse="|"), "outdoor space", .x)) %>%
+  group_by(feature) %>%
+  summarise(feature_count = n()) %>%
+  arrange(desc(feature_count)) %>%
+  filter(feature_count >= 50) %>%
+  mutate(feature_percent = feature_count/nrow(train)) %>% 
+  filter(feature_percent>0.1)
+
+kable(feature, caption = "top 10 features")
+
+```
+
+Okay, after I merged similar synonymic features. To avoid including too many featues, I sort features by their frequencies, and I pick features listed in more than 10% of appartments. As the table shown above, I only need to add 13 features to the original dataset.
+
+
+
+```{r feature matrix, message=FALSE}
+
+# train set
+feature_matrix = data.frame(matrix(0, ncol = nrow(feature), nrow = nrow(train))) %>%
+  setNames(feature$feature)
+
+# clean feature cloumn 
+feature_matrix$feature = train$features %>%
+  map(paste, collapse=" ") %>%
+  map(tolower)%>% # Hardwood
+  map_chr(~ gsub("hardwood floor", "hardwood", .x)) %>%
+  map_chr(~ gsub("hardwoods", "hardwood", .x)) %>%
+  map_chr(~ gsub(paste0(lanudry, collapse="|"), "laundry", .x)) %>%
+  map_chr(~ gsub(paste0(roofdeck, collapse="|"), "roof deck", .x)) %>%
+  map_chr(~ gsub(paste0(outdoorspace, collapse="|"), "outdoor space", .x))
+
+
+#feature_matrix$laundry = feature_matrix$feature %>%
+#  map_chr(~str_detect(.x, "laundry") %>% as.integer)
+
+
+#feature_matrix[, colnames(feature_matrix)[1]] = feature_matrix$feature %>%
+#  map_chr(~str_detect(.x, "laundry") %>% as.integer)
+
+for(col in colnames(feature_matrix)[-ncol(feature_matrix)]) {
+  feature_matrix[, col] = feature_matrix$feature %>%
+    map_chr(~str_detect(.x, col) %>% as.integer)
+  print(col)
+}
+
+train_feature = cbind(train, feature_matrix)
+
+
+# test set
+feature_matrix = data.frame(matrix(0, ncol = nrow(feature), nrow = nrow(test))) %>%
+  setNames(feature$feature)
+
+# clean feature cloumn 
+feature_matrix$feature = test$features %>%
+  map(paste, collapse=" ") %>%
+  map(tolower)%>% # Hardwood
+  map_chr(~ gsub("hardwood floor", "hardwood", .x)) %>%
+  map_chr(~ gsub("hardwoods", "hardwood", .x)) %>%
+  map_chr(~ gsub(paste0(lanudry, collapse="|"), "laundry", .x)) %>%
+  map_chr(~ gsub(paste0(roofdeck, collapse="|"), "roof deck", .x)) %>%
+  map_chr(~ gsub(paste0(outdoorspace, collapse="|"), "outdoor space", .x))
+
+
+for(col in colnames(feature_matrix)[-ncol(feature_matrix)]) {
+  feature_matrix[, col] = feature_matrix$feature %>%
+    map_chr(~str_detect(.x, col) %>% as.integer)
+  print(col)
+}
+
+test_feature = cbind(test, feature_matrix)
+
+# Select predictors
+feature_factor = c("bathrooms", "bedrooms", "manager_id", "laundry", "elevator", "hardwood", "cats allowed", "dogs allowed", "doorman", "dishwasher", "no fee", "fitness center", "pre-war", "outdoor space", "roof deck", "dining room")
+
+test_feature$month = month(test_feature$created)
+test_feature$day = day(test_feature$created)
+
+# Factorize variables
+for(fea in feature_factor){
+test_feature[, fea] = as.factor(test_feature[, fea])
+}
+
+
+train_feature$month = month(train_feature$created)
+train_feature$day = day(train_feature$created)
+# Factorize variables
+for(fea in feature_factor){
+train_feature[, fea] = as.factor(train_feature[, fea])
+}
+train_feature$interest_level = as.factor(train_feature$interest_level)
+
+trainset = train_feature %>% select(bathrooms, bedrooms, month, day, latitude, longitude, manager_id, price, elevator, hardwood, laundry, `cats allowed`, `dogs allowed`, doorman, dishwasher, `fitness center`, `pre-war`, `no fee`, interest_level)
+
+testset = test_feature %>% select(bathrooms, bedrooms, month, day, latitude, longitude, manager_id, price, elevator, hardwood, laundry, `cats allowed`, `dogs allowed`, doorman, dishwasher, `fitness center`, `pre-war`, `no fee`)
+
+trainset %>% group_by(elevator, interest_level) %>%
+  summarise(count = n())
+
+trainset %>% 
+  dcast(interest_level ~ elevator) %>% 
+  melt
+
+require(scales)
+# Elevator
+ggplot(trainset %>% dcast(interest_level ~ elevator) %>% melt, aes(x = variable, y = value, fill = interest_level)) +
+  geom_bar(position = "fill",stat = "identity") +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "Elevator")
+
+# Hardwood
+ggplot(trainset %>% dcast(interest_level ~ hardwood) %>% melt, aes(x = variable, y = value, fill = interest_level)) +
+  geom_bar(position = "fill",stat = "identity") +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "Hardwood")
+
+# Laundry
+ggplot(trainset %>% dcast(interest_level ~ laundry) %>% melt, aes(x = variable, y = value, fill = interest_level)) +
+  geom_bar(position = "fill",stat = "identity") +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "Laundry")
+ 
+# cats allowed
+ggplot(trainset %>% dcast(interest_level ~ `cats allowed`) %>% melt, aes(x = variable, y = value, fill = interest_level)) +
+  geom_bar(position = "fill",stat = "identity") +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "Cats allowed")
+
+# dogs allowed
+ggplot(trainset %>% dcast(interest_level ~ `dogs allowed`) %>% melt, aes(x = variable, y = value, fill = interest_level)) +
+  geom_bar(position = "fill",stat = "identity") +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "Dogs allowed")
+
+# doorman
+ggplot(trainset %>% dcast(interest_level ~ doorman) %>% melt, aes(x = variable, y = value, fill = interest_level)) +
+  geom_bar(position = "fill",stat = "identity") +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "Doorman")
+
+#dishwasher
+ggplot(trainset %>% dcast(interest_level ~ dishwasher) %>% melt, aes(x = variable, y = value, fill = interest_level)) +
+  geom_bar(position = "fill",stat = "identity") +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "Dishwasher")
+
+# fitness room => reduce high interest level
+ggplot(trainset %>% dcast(interest_level ~ `fitness center`) %>% melt, aes(x = variable, y = value, fill = interest_level)) +
+  geom_bar(position = "fill",stat = "identity") +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "Fitness room")
+
+# pre-war => reduce high interest level
+ggplot(trainset %>% dcast(interest_level ~ `pre-war`) %>% melt, aes(x = variable, y = value, fill = interest_level)) +
+  geom_bar(position = "fill",stat = "identity") +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "Pre-war")
+
+# no fee
+ggplot(trainset %>% dcast(interest_level ~ `no fee`) %>% melt, aes(x = variable, y = value, fill = interest_level)) +
+  geom_bar(position = "fill",stat = "identity") +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "No fee")
+```
+ 
+Wait, it occurs me that I need to do some time series visualization here. 
+ 
+ 
+## Model Fitting
+
+```{r Model Fitting, message=FALSE}
+h2o.init(nthreads = -1)
+
+train.h2o = as.h2o(trainset, destination_frame = "train.hex")
+
+# varnames of predictors
+varnames <- setdiff(colnames(trainset), "interest_level")
+
+gbm1 <- h2o.gbm(x = varnames
+                ,y = "interest_level"
+                ,training_frame = train.h2o
+                ,distribution = "multinomial"
+                ,model_id = "gbm1"
+                ,nfolds = 5
+                ,ntrees = 800
+                ,learn_rate = 0.01
+                ,max_depth = 7
+                ,min_rows = 20
+                ,sample_rate = 0.8
+                ,col_sample_rate = 0.7
+                ,stopping_rounds = 5
+                ,stopping_metric = "logloss"
+                ,stopping_tolerance = 0
+                ,seed=321
+                )
+
+```
+
+```{r cross validation on train set, message=FALSE}
+source("multiloss.R")
+
+
+preds_train <- h2o.predict(gbm1, train.h2o)
+preds.df <- as.data.table(preds_train)
+
+trainPreds <- data.table(listing_id = unlist(train$listing_id), preds.df[,.(high, medium, low)])
+
+multiloss(trainPreds, train)
+```
+
+
+
+
+
+```{r predict, message=FALSE}
+
+test.h2o <- as.h2o(testset, destination_frame = "test.hex")
+
+preds <- h2o.predict(gbm1, test.h2o)
+
+preds.df <- as.data.table(preds)
+
+testPreds <- data.table(listing_id = unlist(test$listing_id), preds.df[,.(high, medium, low)])
+fwrite(testPreds, "/Users/andrea/Documents/Project/Kaggle-renthop/submission.csv")
+
+```
+
+
+
+

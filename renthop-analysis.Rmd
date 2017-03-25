@@ -1,0 +1,342 @@
+---
+title: "Renthop: rent an apartment in New York?"
+author: "Andrea Gao"
+date: "3/17/2017"
+output: html_document
+---
+
+Renthop is a New York apartment search engine. They launched a competition and post a dataset of their listings on Kaggle. 
+
+* Their primary goal is to handle fraud control, identify potential list quality issues, and allow owners and agents to better understand renters’ needs and preferences. They want to predict the number of inquiries a new listing receives based on the listing’s creation date and other features like location, price, manager and etc
+
+* I found this project extremely interesting because I want to be familiar apartment in New York and I want to know where is a good location to move in New York.
+
+```{r, warning=FALSE, error=FALSE, message=FALSE}
+require(tidyr)
+require(rjson)
+require(dplyr)
+require(purrr)
+require(knitr)
+require(stringr)
+require(h2o)
+require(lubridate)
+require(data.table)
+load("renthop.RData")
+
+```
+
+### Response Variable: interest_level
+
+Looking at the bar graph of `interest level` below, most of listings belong to low interst group. It means most listings were not  inquired by customers. Accurately, 
+
+* 70% of the listings are in `low interest` group 
+* 23% of the listings are in `medium interest` group
+* 7% of the listings are **really actively inquired**. 
+
+```{r response, message=FALSE, warning=FALSE}
+require(ggplot2)
+# Factorize interest_level
+train$interest_level = as.factor(train$interest_level)
+
+#reorder position
+position = c("low", "medium", "high")
+
+interest_color = c("#ccebc5", "#b3cde3", "#fbb4ae")
+
+ggplot(train, aes(interest_level, fill = interest_level)) + 
+  geom_bar(width = 0.4) +
+  scale_x_discrete(limits = position) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "Bar graph of interest_levet")
+
+train %>% group_by(interest_level) %>%
+  summarise(count = n()/nrow(train)) %>%
+  kable()
+
+```
+
+## How features influence renters' interest level?
+
+### Number of rooms and price of lists
+
+1. First, I plot density curve of price based on different interest level. Obviously, listings on RentHop with lower price attract more inquiries than than more expensive listings.
+
+```{r room, message=FALSE, warning=FALSE}
+require(GGally)
+
+# density of price by interest levels 
+ggplot(train, aes(price, colour = interest_level)) +
+  geom_density(size = 2) +
+  xlim(0, 10000) +
+  scale_colour_brewer(palette = "Set1") +
+  labs(title = "Price density of different interest_level")
+
+```
+
+
+Since around 80% of the listings have exactly 1 bathroom, I didn't include bathroom into paried graph.
+
+2. Then I draw paired graph between price, number of bedroom and interest levet. By observing the paired graphs, we can easily find some trends:
+  +  Again, listings with high interest leavel tend to have lower price.
+  +  Listings with 2 or 3 bedrooms seem to be more popular (with high interest level) because renting a bedroom and sharing living room with some roommate can considerably lower rental cost for most tenants. 
+
+
+```{r, message=FALSE, warning=FALSE}
+# Percentage of listings higher than 10000 dollor
+sum(train$price > 10000)/nrow(train)
+
+# Percentage of listings have 1 bathroom
+sum(train$bathrooms == 1)/nrow(train)
+
+# GGally
+var = train %>%
+  select(bedrooms, price, interest_level) %>%
+  filter(price < 10000, bedrooms <5) %>%
+  mutate(
+    bedrooms = factor(bedrooms),
+    interest_level = factor(interest_level)
+  ) 
+
+pair_graph = ggpairs(var, mapping = aes(color = interest_level)) +
+  labs(title = "Paired graphs of bedroom, price and interst_level ")
+
+for (row in seq_len(pair_graph$nrow))
+  for (col in seq_len(pair_graph$ncol)){
+    pair_graph[row, col] = pair_graph[row, col] + 
+      scale_colour_brewer(palette = "Set1") +
+      scale_fill_brewer(palette = "Set1")
+  }
+
+pair_graph
+```
+
+### How location influence interest level?
+
+To find how location of a listing influences its interest level, I point every list on New York map based on their interest level. Surpurisingly, the three maps are actually very similar. I have to say I cannot easily find which part of the city is more popular than the others. 
+
+From my common sense, the location of an apartment is definitely important for tenant, since the location largely impacts safty, public transportation and education. Therefore, I think the street or community of an apartment might be more important for tenant than pure geological location when they browse on Renthop. 
+
+
+```{r high interest level, message=FALSE, warning=FALSE, error=FALSE}
+require(ggmap)
+require(ggplot2)
+
+# High interest level listings on map
+nymap = get_map("Manhattan Bridges", zoom=11, maptype="toner", source="stamen")
+ggmap(nymap, extent = "device") +
+  geom_point(data = train %>%
+               filter(interest_level == "high"), 
+             aes(x=longitude, y=latitude), 
+             color= "#e41a1c",
+             size = 1,
+             alpha=0.5) +
+  labs(title = "Map of listings with high interest level")
+
+```
+
+
+```{r medium interest level, message=FALSE, warning=FALSE, error=FALSE}
+# Midium interest level listings on map
+ggmap(nymap, extent = "device") +
+  geom_point(data = train %>%
+               filter(interest_level == "medium"), 
+             aes(x=longitude, y=latitude), 
+             color="#377eb8",
+             size = 0.7,
+             alpha=0.5) +
+  labs(title = "Map of listings with medium interest level")
+```
+
+```{r low interest level, message=FALSE, warning=FALSE, error=FALSE}
+
+# low interest level listings on map
+ggmap(nymap, extent = "device") +
+  geom_point(data = train %>%
+               filter(interest_level == "low"), 
+             aes(x=longitude, y=latitude), 
+             color="#4daf4a",
+             size = 0.3,
+             alpha=0.5) +
+  labs(title = "Map of listings with low interest level")
+```
+
+### How does photo influence interest_levet?
+
+Note I've found 70% of the listings are in low interest level group and only 7% of the listings are in high interest level group. The facts I found are:
+
+1. Most listings contain less than 20 photos.
+2. Most apartments with no photos would not be inquired.
+3. Posting some photos (maybe 4 or 5) can increase the probability of being inquired by renters.
+
+
+```{r photo, message=FALSE, warning=FALSE}
+# count number of photo
+train$photo_count = train$photos %>% 
+#  select(photos) %>%
+  map_int(length)
+table(train$photo_count) %>%
+  print
+
+# summarize photo info
+train$photo_count = as.character(train$photo_count)
+train$photo_n = as.numeric(ave(train$photo_count, train$photo_count, FUN = length))
+  
+train$photo_count = as.integer(train$photo_count)
+
+train_photo = train %>% 
+  filter(photo_count<20) %>%
+  group_by(photo_count, interest_level, photo_n) %>%
+  summarise(count_byphoto = n(),
+            mean_price = mean(price)) %>%
+  mutate(count_pct = count_byphoto/photo_n)
+
+# bar chart 
+ggplot(data = train_photo %>% filter(interest_level == "low")) +
+  geom_bar(aes(x = photo_count, y = count_pct), 
+           stat = "identity",
+           fill = interest_color[1]) +
+  geom_hline(yintercept = 0.69)
+
+ggplot(data = train_photo %>% filter(interest_level == "medium")) +
+  geom_bar(aes(x = photo_count, y = count_pct), 
+           stat = "identity",
+           fill = interest_color[2]) +
+  geom_hline(yintercept = 0.227)
+
+ggplot(data = train_photo %>% filter(interest_level == "high")) +
+  geom_bar(aes(x = photo_count, y = count_pct), 
+           stat = "identity",
+           fill = interest_color[3]) +
+  geom_hline(yintercept = 0.0777)
+```
+
+### How about different managers?
+
+
+```{r manager, message=FALSE, error=FALSE, warning=FALSE, eval=FALSE}
+require(reshape2)
+train_manager = dcast(train, manager_id ~ interest_level) %>% 
+  group_by(manager_id) %>%
+  mutate(manager_count = low+medium+high) %>%
+  mutate(low_prob = round(low/manager_count, 2),
+         medium_prob = round(medium/manager_count, 2),
+         high_prob = round(high/manager_count, 2)) %>%
+  arrange(desc(high))
+  
+ggplot(train_manager %>% head(50) %>% select(low, medium, high) %>% melt, 
+  aes(x = manager_id, y = value, fill = variable)) +
+  geom_bar(position = "fill",stat = "identity") +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "", xlab="", ylab="") +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+```
+
+![](manager.jpg)
+
+### How about features?
+
+Browsing the data, I think the 'decrption', 'feature' and 'photo' columns should contain pretty valuable information, but they are a little bit hard to cope with. Here I tried to deal with 'feature'
+
+Let's play with the feature column.
+
+I can easily observe from the table:
+
+* Among 10254 unique feature tags, most features are from the top 10 features: `Hardwood`, `Laundry in unit`, `Roof deck`, `Outdoor space`, `Garden`, `Park`, `Pets allowed`, `Dishwash`, `Fitness room`, `pre-war`, `no fee`
+* Only 89 features show more than 50 times in the train set. 
+* Among the list of top 89 features, many of them overlap with each other.
+
+
+```{r feature and interest level, message=FALSE, warning=FALSE}
+require(scales)
+load("TrainFeature.Rdata")
+# Elevator
+ggplot(trainset %>% dcast(interest_level ~ elevator) %>% melt, aes(x = variable, y = value, fill = interest_level)) +
+  geom_bar(position = "fill",stat = "identity") +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "Elevator")
+
+# Hardwood
+ggplot(trainset %>% dcast(interest_level ~ hardwood) %>% melt, aes(x = variable, y = value, fill = interest_level)) +
+  geom_bar(position = "fill",stat = "identity") +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "Hardwood")
+
+# Laundry
+ggplot(trainset %>% dcast(interest_level ~ laundry) %>% melt, aes(x = variable, y = value, fill = interest_level)) +
+  geom_bar(position = "fill",stat = "identity") +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "Laundry")
+ 
+# cats allowed
+ggplot(trainset %>% dcast(interest_level ~ `cats allowed`) %>% melt, aes(x = variable, y = value, fill = interest_level)) +
+  geom_bar(position = "fill",stat = "identity") +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "Cats allowed")
+
+# dogs allowed
+ggplot(trainset %>% dcast(interest_level ~ `dogs allowed`) %>% melt, aes(x = variable, y = value, fill = interest_level)) +
+  geom_bar(position = "fill",stat = "identity") +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "Dogs allowed")
+
+# doorman
+ggplot(trainset %>% dcast(interest_level ~ doorman) %>% melt, aes(x = variable, y = value, fill = interest_level)) +
+  geom_bar(position = "fill",stat = "identity") +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "Doorman")
+
+#dishwasher
+ggplot(trainset %>% dcast(interest_level ~ dishwasher) %>% melt, aes(x = variable, y = value, fill = interest_level)) +
+  geom_bar(position = "fill",stat = "identity") +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "Dishwasher")
+
+# fitness room => reduce high interest level
+ggplot(trainset %>% dcast(interest_level ~ `fitness center`) %>% melt, aes(x = variable, y = value, fill = interest_level)) +
+  geom_bar(position = "fill",stat = "identity") +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "Fitness room")
+
+# pre-war => reduce high interest level
+ggplot(trainset %>% dcast(interest_level ~ `pre-war`) %>% melt, aes(x = variable, y = value, fill = interest_level)) +
+  geom_bar(position = "fill",stat = "identity") +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "Pre-war")
+
+# no fee
+ggplot(trainset %>% dcast(interest_level ~ `no fee`) %>% melt, aes(x = variable, y = value, fill = interest_level)) +
+  geom_bar(position = "fill",stat = "identity") +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "No fee")
+```
+
+
+## To Sum up
+
+### For Renthop
+
+* Renthop mainly targets college student and young people in New York City. Therefore, their renters are basically more interested in economical apartments.
+* Apartment with real photos can definitely increase its credibility and attracts more renters' interest.
+* Manger of an apartment largely impacts the quality and popularity of the apartment. When optimizing the apartment search system, Renthop should take `manager` feature into serious account. Also I think Renthop should reach out to experienced managers to get the most valuable information in this industry.
+* Some fancy features like `fitness center`, `doorman` and `pre-war` might make an apartment less economical for young renters. 
+* `No fee` is pretty attractive for young renters.
+
+### For my own interest
+
+* How location influences an apartment is more complicated than I expected. I may not tell whether an apartment is good or safe only based its location.
+* Choosing a good manager might save my time when looking for an apartment.
+* If I want to have fitness center, parking lot and doorman in my apartment, I may need to pay a lot for it.
+
